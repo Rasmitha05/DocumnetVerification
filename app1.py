@@ -1,3 +1,4 @@
+from tamper_check import assess_aadhaar, extract_aadhaar_number
 import streamlit as st
 from PIL import Image
 import pytesseract
@@ -79,6 +80,7 @@ def generate_aadhaar_pdf(data_list):
         pdf.cell(200, 10, txt=f"Name: {data['name']}", ln=1)
         pdf.cell(200, 10, txt=f"DOB: {data['dob']}", ln=1)
         pdf.cell(200, 10, txt=f"Gender: {data['gender']}", ln=1)
+        pdf.cell(200, 10, txt=f"Tamper Verdict: {data['tamper_verdict']} (ELA: {data['tamper_ela_score']:.2f})", ln=1)
         pdf.ln(10)
 
     file_path = f"aadhaar_report_{uuid.uuid4().hex[:6]}.pdf"
@@ -143,9 +145,44 @@ with tab1:
     if uploaded:
         for file in uploaded:
             img = Image.open(file)
-            is_aadhar, num, name, dob, gender = extract_aadhaar_details(img)
 
+            # Ensure RGB (important for JPEG saving)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+
+            # Save temporary image for ELA check
+            temp_path = "temp_aadhaar.jpg"
+            img.save(temp_path, "JPEG")
+
+            # Extract Aadhaar details (name, dob, gender)
+            is_aadhar, _, name, dob, gender = extract_aadhaar_details(img)
+
+            # Extract Aadhaar number separately (for tamper check)
+            num = extract_aadhaar_number(img)
+
+            # Run tamper detection with Aadhaar number
+            assess = assess_aadhaar(temp_path, extracted_num=num)
+            verdict = assess["verdict"]
+            ela_score = assess["details"]["ela_score"]
+            reasons = assess["reasons"]
+
+            # Display Aadhaar image
             st.image(img, caption="Uploaded Aadhaar", use_column_width=True)
+
+            # Show tamper check verdict
+            if verdict == "real":
+                st.success(f"✅ Aadhaar looks REAL (ELA Score: {ela_score:.2f})")
+            elif verdict == "fake":
+                st.error(f"❌ Aadhaar looks FAKE / Tampered (ELA Score: {ela_score:.2f})")
+            else:
+                st.warning(f"⚠ Aadhaar is SUSPICIOUS (ELA Score: {ela_score:.2f})")
+
+            # Show reasons
+            with st.expander("Why this verdict?"):
+                for r in reasons:
+                    st.write(f"- {r}")
+
+            # Aadhaar text info
             if is_aadhar:
                 st.success("🟢 Aadhaar Card Verified")
             else:
@@ -157,14 +194,19 @@ with tab1:
             st.markdown(f"**Gender:** {gender}")
             st.markdown("---")
 
+            # Save details for PDF
             aadhaar_data.append({
                 "verified": is_aadhar,
                 "aadhar": num,
                 "name": name,
                 "dob": dob,
-                "gender": gender
+                "gender": gender,
+                "tamper_verdict": verdict,
+                "tamper_ela_score": ela_score,
+                "tamper_reasons": reasons
             })
 
+        # Generate report
         if st.button("📄 Generate Aadhaar PDF Report"):
             pdf_path = generate_aadhaar_pdf(aadhaar_data)
             with open(pdf_path, "rb") as f:
