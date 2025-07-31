@@ -1,4 +1,8 @@
+from utils.matcher import similarity
+from utils.timer import time_it
+import os
 from tamper_check import assess_aadhaar, extract_aadhaar_number
+from tamper_check_pan import assess_pan
 import streamlit as st
 from PIL import Image
 import pytesseract
@@ -7,21 +11,27 @@ import uuid
 from fpdf import FPDF
 import difflib
 
-# Configure Tesseract path
+# Tesseract path
 pytesseract.pytesseract.tesseract_cmd = r"C:/Program Files/Tesseract-OCR/tesseract.exe"
 
+# ----------------- Page Header -----------------
 st.set_page_config(page_title="Document Verifier", layout="centered")
-st.title("📑 Document Verification Portal")
 
-tab1, tab2 = st.tabs(["🪪 Aadhaar Card", "💳 PAN Card"])
+col1, col2 = st.columns([1, 5])
+with col1:
+    st.image("assets/logo.png", width=80)
+with col2:
+    st.markdown("## 📑 Document Verification Portal")
 
-# -------------------- AADHAAR FUNCTIONS --------------------
+tab1, tab2 = st.tabs(["\U0001FAAA Aadhaar Card", "\U0001F4B3 PAN Card"])
+
+# ----------------- Aadhaar Functions -----------------
+
 def extract_aadhaar_details(image):
     text = pytesseract.image_to_string(image)
     words = text.split()
     clean_text = " ".join(words)
 
-    # Aadhaar number
     aadhar = None
     for i in range(len(words) - 2):
         w1, w2, w3 = words[i], words[i + 1], words[i + 2]
@@ -32,7 +42,6 @@ def extract_aadhaar_details(image):
                 break
     is_aadhar = aadhar is not None
 
-    # Name
     name = "Unknown"
     for i in range(len(words)):
         if words[i].lower() == "name" and i + 2 < len(words) and words[i + 1] == ":":
@@ -41,7 +50,6 @@ def extract_aadhaar_details(image):
                 name = " ".join(name_parts)
                 break
 
-    # DOB
     dob = "Not Found"
     possible_dobs = [w for w in words if len(w) >= 8 and len(w) <= 12]
     for raw in possible_dobs:
@@ -56,7 +64,6 @@ def extract_aadhaar_details(image):
             except:
                 continue
 
-    # Gender
     gender = "Not Found"
     for w in words:
         cleaned = re.sub(r'[^a-zA-Z]', '', w.lower())
@@ -87,13 +94,13 @@ def generate_aadhaar_pdf(data_list):
     pdf.output(file_path)
     return file_path
 
-# -------------------- PAN FUNCTIONS --------------------
+# ----------------- PAN Functions -----------------
+
 def extract_pan_details(image):
     text = pytesseract.image_to_string(image)
     words = text.split()
     text_clean = text.replace("\n", " ")
 
-    # PAN number
     pan_number = "Not Found"
     for word in words:
         pan_candidate = word.upper().strip()
@@ -101,7 +108,6 @@ def extract_pan_details(image):
             pan_number = pan_candidate
             break
 
-    # Name
     name = "Unknown"
     for i, w in enumerate(words):
         if pan_number in w:
@@ -111,7 +117,6 @@ def extract_pan_details(image):
                     break
             break
 
-    # DOB
     dob = "Not Found"
     match = re.search(r'\d{2}/\d{2}/\d{4}', text_clean)
     if match:
@@ -131,58 +136,46 @@ def generate_pan_pdf(data_list):
         pdf.cell(200, 10, txt=f"PAN No: {data['pan']}", ln=1)
         pdf.cell(200, 10, txt=f"Name: {data['name']}", ln=1)
         pdf.cell(200, 10, txt=f"DOB: {data['dob']}", ln=1)
+        pdf.cell(200, 10, txt=f"Tamper Verdict: {data['tamper_verdict']} (ELA: {data['tamper_ela_score']:.2f})", ln=1)
         pdf.ln(10)
 
     file_path = f"pan_report_{uuid.uuid4().hex[:6]}.pdf"
     pdf.output(file_path)
     return file_path
 
-# -------------------- AADHAAR TAB --------------------
+# ----------------- Aadhaar Tab -----------------
+
 with tab1:
     uploaded = st.file_uploader("Upload Aadhaar Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
     aadhaar_data = []
 
     if uploaded:
         for file in uploaded:
-            img = Image.open(file)
-
-            # Ensure RGB (important for JPEG saving)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-
-            # Save temporary image for ELA check
+            img = Image.open(file).convert("RGB")
             temp_path = "temp_aadhaar.jpg"
             img.save(temp_path, "JPEG")
 
-            # Extract Aadhaar details (name, dob, gender)
-            is_aadhar, _, name, dob, gender = extract_aadhaar_details(img)
+            with st.spinner("⏳ Please wait... Your Aadhaar is being processed."):
+                is_aadhar, _, name, dob, gender = extract_aadhaar_details(img)
+                num = extract_aadhaar_number(img)
+                assess = assess_aadhaar(temp_path, extracted_num=num)
+                verdict = assess["verdict"]
+                ela_score = assess["details"]["ela_score"]
+                reasons = assess["reasons"]
 
-            # Extract Aadhaar number separately (for tamper check)
-            num = extract_aadhaar_number(img)
-
-            # Run tamper detection with Aadhaar number
-            assess = assess_aadhaar(temp_path, extracted_num=num)
-            verdict = assess["verdict"]
-            ela_score = assess["details"]["ela_score"]
-            reasons = assess["reasons"]
-
-            # Display Aadhaar image
             st.image(img, caption="Uploaded Aadhaar", use_column_width=True)
 
-            # Show tamper check verdict
             if verdict == "real":
                 st.success(f"✅ Aadhaar looks REAL (ELA Score: {ela_score:.2f})")
             elif verdict == "fake":
                 st.error(f"❌ Aadhaar looks FAKE / Tampered (ELA Score: {ela_score:.2f})")
             else:
-                st.warning(f"⚠ Aadhaar is SUSPICIOUS (ELA Score: {ela_score:.2f})")
+                st.warning(f"⚠️ Aadhaar is SUSPICIOUS (ELA Score: {ela_score:.2f})")
 
-            # Show reasons
             with st.expander("Why this verdict?"):
                 for r in reasons:
                     st.write(f"- {r}")
 
-            # Aadhaar text info
             if is_aadhar:
                 st.success("🟢 Aadhaar Card Verified")
             else:
@@ -194,7 +187,6 @@ with tab1:
             st.markdown(f"**Gender:** {gender}")
             st.markdown("---")
 
-            # Save details for PDF
             aadhaar_data.append({
                 "verified": is_aadhar,
                 "aadhar": num,
@@ -206,23 +198,43 @@ with tab1:
                 "tamper_reasons": reasons
             })
 
-        # Generate report
         if st.button("📄 Generate Aadhaar PDF Report"):
             pdf_path = generate_aadhaar_pdf(aadhaar_data)
             with open(pdf_path, "rb") as f:
                 st.download_button("⬇️ Download Aadhaar Report", f, file_name="aadhaar_report.pdf")
 
-# -------------------- PAN TAB --------------------
+# ----------------- PAN Tab -----------------
+
 with tab2:
     uploaded_pan = st.file_uploader("Upload PAN Card Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="pan_upload")
     pan_data = []
 
     if uploaded_pan:
         for file in uploaded_pan:
-            img = Image.open(file)
-            pan, name, dob = extract_pan_details(img)
+            img = Image.open(file).convert("RGB")
+            temp_path = "temp_pan.jpg"
+            img.save(temp_path, "JPEG")
+
+            with st.spinner("⏳ Please wait... Your PAN is being processed."):
+                pan, name, dob = extract_pan_details(img)
+                assess = assess_pan(temp_path)
+                verdict = assess["verdict"]
+                ela_score = assess["details"]["ela_score"]
+                reasons = assess["reasons"]
 
             st.image(img, caption="Uploaded PAN", use_column_width=True)
+
+            if verdict == "real":
+                st.success(f"✅ PAN looks REAL (ELA Score: {ela_score:.2f})")
+            elif verdict == "fake":
+                st.error(f"❌ PAN looks FAKE / Tampered (ELA Score: {ela_score:.2f})")
+            else:
+                st.warning(f"⚠️ PAN is SUSPICIOUS (ELA Score: {ela_score:.2f})")
+
+            with st.expander("Why this verdict?"):
+                for r in reasons:
+                    st.write(f"- {r}")
+
             if pan != "Not Found":
                 st.success("🟢 PAN Card Verified")
             else:
@@ -236,10 +248,18 @@ with tab2:
             pan_data.append({
                 "pan": pan,
                 "name": name,
-                "dob": dob
+                "dob": dob,
+                "tamper_verdict": verdict,
+                "tamper_ela_score": ela_score,
+                "tamper_reasons": reasons
             })
 
         if st.button("📄 Generate PAN PDF Report"):
             pdf_path = generate_pan_pdf(pan_data)
             with open(pdf_path, "rb") as f:
                 st.download_button("⬇️ Download PAN Report", f, file_name="pan_report.pdf")
+
+# ----------------- Footer -----------------
+
+st.markdown("---")
+st.markdown("*Crafted with precision and integrity by a passionate team — Document Verifier © 2025*")
